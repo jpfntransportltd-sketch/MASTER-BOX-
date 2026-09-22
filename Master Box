@@ -1,0 +1,634 @@
+import os, uuid, json
+from flask import Flask, request, send_file, render_template_string, session, redirect, url_for
+import yt_dlp, imageio_ffmpeg
+
+app = Flask(__name__)
+app.secret_key = os.environ.get('SECRET_KEY', 'master-box-secret-key-2026')
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'master@123')
+os.makedirs("dl", exist_ok=True)
+os.makedirs("static", exist_ok=True)
+FF = imageio_ffmpeg.get_ffmpeg_exe()
+CFG = "config.json"
+
+def load_cfg():
+    if os.path.exists(CFG):
+        try:
+            with open(CFG) as f: return json.load(f)
+        except: pass
+    return {
+        "site_name": "Master Box",
+        "tagline": "Download · Cut · Share",
+        "logo_url": "",
+        "home_title": "Welcome to Master Box",
+        "home_text": "All-in-one media toolkit. Download videos, extract MP3, cut ringtones, and manage PDFs — all free.",
+        "footer_text": "© 2026 Master Box. All rights reserved.",
+        "accent": "#FFD700"
+    }
+
+def save_cfg(c):
+    with open(CFG, 'w') as f: json.dump(c, f, indent=2)
+
+def base_html(cfg, content, is_admin=False):
+    logo_html = f'<img src="{cfg["logo_url"]}" style="width:52px;height:52px;border-radius:50%;object-fit:cover;border:3px solid #FFD700;box-shadow:0 4px 12px rgba(255,215,0,0.4)">' if cfg.get("logo_url") else '<div style="width:52px;height:52px;border-radius:50%;background:linear-gradient(135deg,#FFD700,#FFED4E);display:flex;align-items:center;justify-content:center;font-size:26px;border:3px solid #fff;box-shadow:0 4px 12px rgba(255,215,0,0.4)">🌐</div>'
+    return f"""<!DOCTYPE html><html><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>{cfg['site_name']}</title>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,sans-serif;-webkit-tap-highlight-color:transparent}}
+body{{background:#FFFDF5;color:#4B5563;padding-bottom:40px;min-height:100vh}}
+@keyframes flow{{0%{{background-position:0% 50%}}50%{{background-position:100% 50%}}100%{{background-position:0% 50%}}}}
+@keyframes shine{{0%,100%{{box-shadow:0 4px 20px rgba(255,215,0,0.3)}}50%{{box-shadow:0 4px 30px rgba(255,215,0,0.6)}}}}
+.topbar{{
+  background:linear-gradient(90deg,#FFD700,#FFED4E,#93C5FD,#FFD700);
+  background-size:400% 400%;
+  animation:flow 10s ease infinite;
+  padding:16px 18px;
+  display:flex;align-items:center;gap:14px;
+  box-shadow:0 4px 20px rgba(255,215,0,0.3);
+  position:sticky;top:0;z-index:100;
+}}
+.topbar-text h1{{font-size:20px;font-weight:800;color:#374151;text-shadow:0 1px 2px rgba(255,255,255,0.7)}}
+.topbar-text p{{font-size:11px;color:#4B5563;font-weight:600;margin-top:2px}}
+.menu-btn{{
+  margin-left:auto;
+  background:rgba(255,255,255,0.85);
+  border:none;
+  width:42px;height:42px;
+  border-radius:12px;
+  font-size:22px;
+  cursor:pointer;
+  box-shadow:0 2px 8px rgba(0,0,0,0.08);
+}}
+.drawer{{
+  position:fixed;top:0;right:-300px;width:280px;height:100vh;
+  background:#FFFDF5;z-index:200;
+  box-shadow:-4px 0 20px rgba(0,0,0,0.1);
+  transition:right 0.3s;
+  padding:24px 20px;
+  overflow-y:auto;
+}}
+.drawer.open{{right:0}}
+.drawer-overlay{{position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:150;display:none}}
+.drawer-overlay.open{{display:block}}
+.drawer h3{{font-size:14px;color:#F59E0B;text-transform:uppercase;letter-spacing:1px;margin-bottom:16px;font-weight:800}}
+.drawer a{{
+  display:block;padding:14px 16px;
+  color:#4B5563;text-decoration:none;
+  font-size:15px;font-weight:600;
+  border-radius:12px;margin-bottom:6px;
+  background:#fff;border:2px solid #FDE68A;
+}}
+.drawer a:active{{background:#FFF9E6}}
+.drawer a.admin{{background:linear-gradient(135deg,#FFD700,#FFED4E);border-color:#FFD700}}
+.close-x{{position:absolute;top:16px;right:16px;background:none;border:none;font-size:26px;color:#9CA3AF}}
+.langs{{display:flex;gap:8px;padding:14px 16px;background:#FFF9E6;overflow-x:auto;-webkit-overflow-scrolling:touch}}
+.langs button{{padding:8px 16px;border:2px solid #FDE68A;background:#fff;border-radius:20px;font-size:13px;font-weight:700;color:#6B7280;white-space:nowrap;cursor:pointer}}
+.langs button.on{{background:linear-gradient(135deg,#FFD700,#FFED4E);color:#374151;border-color:#FFD700;box-shadow:0 2px 8px rgba(255,215,0,0.4)}}
+.tabs{{display:flex;gap:6px;padding:10px 12px;background:#FFF9E6;overflow-x:auto}}
+.tabs button{{flex:1;padding:12px 8px;border:2px solid transparent;background:#fff;border-radius:12px;font-size:12px;font-weight:700;color:#9CA3AF;white-space:nowrap;cursor:pointer;min-width:72px}}
+.tabs button.on{{background:linear-gradient(135deg,#FFD700,#FFED4E);color:#374151;box-shadow:0 3px 10px rgba(255,215,0,0.4)}}
+.wrap{{padding:16px}}
+.hero{{
+  background:linear-gradient(135deg,#FFFDF5,#FFF9E6);
+  border:2px solid #FDE68A;border-radius:20px;
+  padding:24px;margin-bottom:16px;text-align:center;
+  box-shadow:0 4px 16px rgba(255,215,0,0.15);
+  animation:shine 4s ease-in-out infinite;
+}}
+.hero h2{{font-size:20px;color:#374151;margin-bottom:8px}}
+.hero p{{font-size:13px;color:#6B7280;line-height:1.6}}
+.card{{background:linear-gradient(135deg,#FFFDF5,#FFF9E6);border:2px solid #FDE68A;border-radius:20px;padding:22px;margin-bottom:16px;box-shadow:0 4px 16px rgba(255,215,0,0.15)}}
+.card h2{{font-size:19px;color:#374151;margin-bottom:16px;font-weight:800}}
+.card h2 span{{color:#F59E0B}}
+input[type=text],input[type=number],input[type=password],textarea{{
+  width:100%;padding:14px;border:2px solid #FDE68A;border-radius:12px;
+  font-size:15px;margin-bottom:12px;background:#fff;outline:none;
+  color:#4B5563;transition:all 0.3s;font-family:inherit;
+}}
+input:focus,textarea:focus{{border-color:#FFD700;box-shadow:0 0 0 3px rgba(255,215,0,0.15)}}
+textarea{{resize:vertical;min-height:80px}}
+input[type=file]{{width:100%;padding:14px;border:2px dashed #FDE68A;border-radius:12px;font-size:14px;margin-bottom:12px;background:#FFFDF5;color:#6B7280}}
+.btn{{width:100%;padding:16px;background:linear-gradient(135deg,#FFD700,#FFED4E);color:#374151;border:none;border-radius:12px;font-size:16px;font-weight:800;margin-top:4px;cursor:pointer;box-shadow:0 4px 12px rgba(255,215,0,0.3)}}
+.btn:active{{transform:scale(0.98)}}
+.btn:disabled{{opacity:0.6}}
+.btn.blue{{background:linear-gradient(135deg,#60A5FA,#93C5FD);color:#fff;box-shadow:0 4px 12px rgba(96,165,250,0.4)}}
+.btn.dark{{background:#4B5563;color:#fff}}
+.res{{margin-top:14px;padding:14px;border-radius:12px;font-size:14px;display:none;word-break:break-word;line-height:1.5}}
+.res.ok{{background:#D1FAE5;color:#065F46;display:block;border-left:4px solid #10B981}}
+.res.err{{background:#FEE2E2;color:#991B1B;display:block;border-left:4px solid #EF4444}}
+.res.info{{background:#FEF3C7;color:#92400E;display:block;border-left:4px solid #F59E0B}}
+.res a{{color:#065F46;font-weight:800;display:block;margin-top:10px;padding:12px;background:#fff;border-radius:8px;text-align:center;text-decoration:none;border:2px solid #10B981}}
+.res a.blue{{color:#1E40AF;border-color:#60A5FA}}
+.hide{{display:none}}
+.feature{{padding:12px 0;border-bottom:1px solid #FDE68A;font-size:14px;display:flex;gap:12px;align-items:center;color:#4B5563}}
+.feature:last-child{{border:none}}
+.feature-icon{{font-size:22px;min-width:30px}}
+.page{{background:#FFFDF5;padding:20px}}
+.page h2{{font-size:22px;color:#374151;margin-bottom:16px;padding-bottom:12px;border-bottom:3px solid #FFD700}}
+.page h3{{font-size:16px;color:#F59E0B;margin:16px 0 8px;font-weight:800}}
+.page p,.page li{{font-size:14px;line-height:1.7;color:#4B5563;margin-bottom:10px}}
+.page ul{{padding-left:20px}}
+.back{{display:inline-block;padding:10px 18px;background:linear-gradient(135deg,#FFD700,#FFED4E);color:#374151;border-radius:10px;font-weight:700;font-size:14px;text-decoration:none;margin-bottom:16px;box-shadow:0 2px 8px rgba(255,215,0,0.3)}}
+.footer{{text-align:center;padding:24px 16px;color:#9CA3AF;font-size:12px}}
+.footer a{{color:#F59E0B;text-decoration:none;margin:0 8px;font-weight:700}}
+.toast{{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#374151;color:#fff;padding:12px 24px;border-radius:24px;font-size:14px;font-weight:600;box-shadow:0 8px 24px rgba(0,0,0,0.2);z-index:999;display:none}}
+.toast.show{{display:block}}
+</style>
+</head><body>
+
+<div class="topbar">
+  {logo_html}
+  <div class="topbar-text">
+    <h1>{cfg['site_name']}</h1>
+    <p>{cfg['tagline']}</p>
+  </div>
+  <button class="menu-btn" onclick="toggleMenu()">☰</button>
+</div>
+
+<div class="drawer-overlay" id="ov" onclick="toggleMenu()"></div>
+<div class="drawer" id="drawer">
+  <button class="close-x" onclick="toggleMenu()">✕</button>
+  <h3>Menu</h3>
+  <a href="/" onclick="toggleMenu()">🏠 Home</a>
+  <a href="/#tools" onclick="toggleMenu()">🛠️ Tools</a>
+  <a href="/about" onclick="toggleMenu()">📚 About</a>
+  <a href="/privacy" onclick="toggleMenu()">🔒 Privacy</a>
+  <a href="/disclaimer" onclick="toggleMenu()">⚠️ Disclaimer</a>
+  <a href="/contact" onclick="toggleMenu()">📧 Contact</a>
+  <a href="/admin" class="admin" onclick="toggleMenu()">⚙️ Admin Panel</a>
+</div>
+
+{content}
+
+<div class="footer">
+  <a href="/about">About</a>
+  <a href="/privacy">Privacy</a>
+  <a href="/disclaimer">Disclaimer</a>
+  <a href="/contact">Contact</a>
+  <p style="margin-top:14px;color:#D1D5DB">{cfg['footer_text']}</p>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+function toggleMenu(){{
+  document.getElementById('drawer').classList.toggle('open');
+  document.getElementById('ov').classList.toggle('open');
+}}
+function showToast(msg){{
+  const t=document.getElementById('toast');
+  t.textContent=msg;
+  t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'),2500);
+}}
+</script>
+</body></html>"""
+
+HOME_CONTENT = """
+<header id="tools" style="background:linear-gradient(135deg,#FFF9E6,#FFFDF5);padding:20px 16px 8px">
+  <div class="hero" style="margin:0">
+    <h2 id="home-title">{HOME_TITLE}</h2>
+    <p id="home-text">{HOME_TEXT}</p>
+  </div>
+</header>
+
+<div class="langs">
+  <button class="on" onclick="L('en',this)">English</button>
+  <button onclick="L('pa',this)">ਪੰਜਾਬੀ</button>
+  <button onclick="L('hi',this)">हिंदी</button>
+  <button onclick="L('es',this)">Español</button>
+  <button onclick="L('ar',this)">العربية</button>
+  <button onclick="L('fr',this)">Français</button>
+  <button onclick="L('de',this)">Deutsch</button>
+</div>
+
+<div class="tabs">
+  <button class="on" onclick="T('v',this)">🎬 Video</button>
+  <button onclick="T('a',this)">🎵 MP3</button>
+  <button onclick="T('r',this)">✂️ Ringtone</button>
+  <button onclick="T('p',this)">📄 PDF</button>
+  <button onclick="T('i',this)">📋 Info</button>
+</div>
+
+<div class="wrap">
+
+  <div id="tab-v">
+    <div class="card">
+      <h2>🎬 <span id="h1">Download Video</span></h2>
+      <input type="text" id="vurl" placeholder="Paste YouTube / TikTok / Instagram URL...">
+      <button class="btn" id="b1" onclick="dl('video')">⬇️ <span id="b1t">Download Video</span></button>
+      <div class="res" id="r1"></div>
+    </div>
+  </div>
+
+  <div id="tab-a" class="hide">
+    <div class="card">
+      <h2>🎵 <span id="h2">Download MP3</span></h2>
+      <input type="text" id="aurl" placeholder="Paste URL for MP3...">
+      <button class="btn" id="b2" onclick="dl('mp3')">🎵 <span id="b2t">Extract MP3</span></button>
+      <div class="res" id="r2"></div>
+    </div>
+  </div>
+
+  <div id="tab-r" class="hide">
+    <div class="card">
+      <h2>✂️ <span id="h3">Ringtone Cutter</span></h2>
+      <input type="file" id="rf" accept="audio/*">
+      <input type="number" id="rs" placeholder="Start (seconds)" value="0">
+      <input type="number" id="re" placeholder="End (seconds)" value="30">
+      <button class="btn" id="b3" onclick="cut()">✂️ <span id="b3t">Cut Ringtone</span></button>
+      <div class="res" id="r3"></div>
+    </div>
+  </div>
+
+  <div id="tab-p" class="hide">
+    <div class="card">
+      <h2>📄 <span>PDF Tools</span></h2>
+      <input type="file" id="pdff" accept="application/pdf">
+      <button class="btn blue" onclick="sharePDF()">📤 Share / Save PDF</button>
+      <div class="res" id="r4"></div>
+    </div>
+  </div>
+
+  <div id="tab-i" class="hide">
+    <div class="card">
+      <h2>📋 <span>All Features</span></h2>
+      <div class="feature"><span class="feature-icon">🎬</span><span>Video download (1000+ sites)</span></div>
+      <div class="feature"><span class="feature-icon">🎵</span><span>MP3 audio extraction</span></div>
+      <div class="feature"><span class="feature-icon">✂️</span><span>Ringtone cutter</span></div>
+      <div class="feature"><span class="feature-icon">📄</span><span>PDF upload & share</span></div>
+      <div class="feature"><span class="feature-icon">📤</span><span>Share to WhatsApp</span></div>
+      <div class="feature"><span class="feature-icon">🌐</span><span>7 languages support</span></div>
+      <div class="feature"><span class="feature-icon">🔒</span><span>Privacy protected</span></div>
+      <div class="feature"><span class="feature-icon">⚙️</span><span>Admin editable</span></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const TT={
+  en:{tag:"Download · Cut · Share",h1:"Download Video",b1:"Download Video",h2:"Download MP3",b2:"Extract MP3",h3:"Ringtone Cutter",b3:"Cut Ringtone"},
+  pa:{tag:"ਡਾਊਨਲੋਡ · ਕੱਟੋ · ਸਾਂਝਾ ਕਰੋ",h1:"ਵੀਡੀਓ ਡਾਊਨਲੋਡ",b1:"ਵੀਡੀਓ ਡਾਊਨਲੋਡ",h2:"MP3 ਡਾਊਨਲੋਡ",b2:"MP3 ਕੱਢੋ",h3:"ਰਿੰਗਟੋਨ ਕਟਰ",b3:"ਰਿੰਗਟੋਨ ਕੱਟੋ"},
+  hi:{tag:"डाउनलोड · काटें · शेयर",h1:"वीडियो डाउनलोड",b1:"वीडियो डाउनलोड",h2:"MP3 डाउनलोड",b2:"MP3 निकालें",h3:"रिंगटोन कटर",b3:"रिंगटोन काटें"},
+  es:{tag:"Descargar · Cortar",h1:"Descargar Video",b1:"Descargar Video",h2:"Descargar MP3",b2:"Extraer MP3",h3:"Cortador de Tono",b3:"Cortar Tono"},
+  ar:{tag:"تحميل · قص · مشاركة",h1:"تحميل الفيديو",b1:"تحميل الفيديو",h2:"تحميل MP3",b2:"استخراج MP3",h3:"قاطع النغمة",b3:"قص النغمة"},
+  fr:{tag:"Télécharger · Couper",h1:"Télécharger Vidéo",b1:"Télécharger Vidéo",h2:"Télécharger MP3",b2:"Extraire MP3",h3:"Coupeur de Sonnerie",b3:"Couper Sonnerie"},
+  de:{tag:"Herunterladen · Schneiden",h1:"Video Herunterladen",b1:"Video Herunterladen",h2:"MP3 Herunterladen",b2:"MP3 Extrahieren",h3:"Klingelton Schneider",b3:"Klingelton Schneiden"}
+};
+function L(l,e){
+  document.querySelectorAll('.langs button').forEach(b=>b.classList.remove('on'));
+  e.classList.add('on');
+  const t=TT[l];
+  document.getElementById('h1').textContent=t.h1;
+  document.getElementById('b1t').textContent=t.b1;
+  document.getElementById('h2').textContent=t.h2;
+  document.getElementById('b2t').textContent=t.b2;
+  document.getElementById('h3').textContent=t.h3;
+  document.getElementById('b3t').textContent=t.b3;
+}
+function T(n,e){
+  document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('on'));
+  e.classList.add('on');
+  ['v','a','r','p','i'].forEach(x=>document.getElementById('tab-'+x).classList.add('hide'));
+  document.getElementById('tab-'+n).classList.remove('hide');
+}
+async function dl(f){
+  const u=f==='video'?document.getElementById('vurl').value:document.getElementById('aurl').value;
+  const r=f==='video'?document.getElementById('r1'):document.getElementById('r2');
+  const b=f==='video'?document.getElementById('b1'):document.getElementById('b2');
+  if(!u){r.className='res err';r.textContent='⚠️ Please paste a URL';return;}
+  b.disabled=true;
+  const orig=b.innerHTML;
+  b.innerHTML='⏳ Processing...';
+  r.className='res info';
+  r.textContent='⏳ Downloading... Please wait';
+  try{
+    const x=await fetch('/api/download?url='+encodeURIComponent(u)+'&format='+f,{method:'POST'});
+    const d=await x.json();
+    if(d.ok){
+      r.className='res ok';
+      r.innerHTML='✅ '+d.title+'<a href="/api/file/'+d.filename+'" download>📥 Save to Phone</a><a class="blue" onclick="shareFile(\\''+d.filename+'\\')">📤 Share</a>';
+    } else {
+      r.className='res err';
+      r.textContent='❌ '+d.error;
+    }
+  }catch(e){
+    r.className='res err';
+    r.textContent='❌ Connection error';
+  }
+  b.disabled=false;
+  b.innerHTML=orig;
+}
+async function cut(){
+  const f=document.getElementById('rf').files[0];
+  const r=document.getElementById('r3');
+  if(!f){r.className='res err';r.textContent='⚠️ Select an audio file';return;}
+  r.className='res info';
+  r.textContent='⏳ Cutting...';
+  const fd=new FormData();
+  fd.append('file',f);
+  fd.append('start',document.getElementById('rs').value);
+  fd.append('end',document.getElementById('re').value);
+  try{
+    const x=await fetch('/api/ringtone',{method:'POST',body:fd});
+    const d=await x.json();
+    if(d.ok){
+      r.className='res ok';
+      r.innerHTML='✅ Ringtone Ready<a href="/api/file/'+d.filename+'" download>📥 Save</a><a class="blue" onclick="shareFile(\\''+d.filename+'\\')">📤 Share</a>';
+    } else {
+      r.className='res err';
+      r.textContent='❌ '+d.error;
+    }
+  }catch(e){
+    r.className='res err';
+    r.textContent='❌ Error';
+  }
+}
+function sharePDF(){
+  const f=document.getElementById('pdff').files[0];
+  const r=document.getElementById('r4');
+  if(!f){r.className='res err';r.textContent='⚠️ Select a PDF file';return;}
+  if(navigator.share){
+    navigator.share({title:f.name,files:[f]}).then(()=>{
+      r.className='res ok';r.textContent='✅ Shared successfully';
+    }).catch(()=>{
+      r.className='res info';r.textContent='ℹ️ Saved: '+f.name;
+    });
+  } else {
+    r.className='res info';r.textContent='ℹ️ File selected: '+f.name;
+  }
+}
+function shareFile(filename){
+  const url=window.location.origin+'/api/file/'+filename;
+  if(navigator.share){
+    navigator.share({title:'Master Box',text:'Downloaded from Master Box',url:url}).catch(()=>{});
+  } else {
+    navigator.clipboard.writeText(url);
+    showToast('Link copied!');
+  }
+}
+</script>
+"""
+
+def page_html(title, body):
+    return f"""
+<div class="page">
+  <a class="back" href="/">← Back</a>
+  <h2>{title}</h2>
+  {body}
+</div>"""
+
+@app.route("/")
+def home():
+    cfg = load_cfg()
+    content = HOME_CONTENT.replace("{HOME_TITLE}", cfg['home_title']).replace("{HOME_TEXT}", cfg['home_text'])
+    return render_template_string(base_html(cfg, content))
+
+@app.route("/about")
+def about():
+    cfg = load_cfg()
+    body = """
+    <p>Master Box is an all-in-one media toolkit that lets you download videos, extract MP3 audio, cut ringtones, and manage PDF files — all from one simple app.</p>
+    <h3>🎯 Our Mission</h3>
+    <p>Make media tools simple, fast, and free for everyone. No complicated steps. Just paste a link and download.</p>
+    <h3>✨ Features</h3>
+    <ul>
+      <li>Download from 1000+ websites</li>
+      <li>Extract MP3 in high quality</li>
+      <li>Cut custom ringtones</li>
+      <li>Upload and share PDFs</li>
+      <li>Supports 7+ languages</li>
+      <li>Admin editable interface</li>
+    </ul>
+    <h3>📧 Contact</h3>
+    <p>Email: support@masterbox.app</p>
+    """
+    return render_template_string(base_html(cfg, page_html("📚 About Master Box", body)))
+
+@app.route("/privacy")
+def privacy():
+    cfg = load_cfg()
+    body = """
+    <p><strong>Last Updated:</strong> 2026</p>
+    <h3>1. Data We Collect</h3>
+    <p>We do not collect personal information. Downloaded files are stored temporarily on our server and deleted automatically.</p>
+    <h3>2. How We Use Data</h3>
+    <ul>
+      <li>Process your download requests</li>
+      <li>Improve service speed</li>
+      <li>No data sold to third parties</li>
+    </ul>
+    <h3>3. Cookies</h3>
+    <p>We do not use cookies to track users. Only essential session data is used for admin login.</p>
+    <h3>4. Third-Party Services</h3>
+    <p>We use yt-dlp for downloads. Their respective platform policies apply.</p>
+    <h3>5. Your Rights</h3>
+    <ul>
+      <li>Delete your data anytime</li>
+      <li>No account required</li>
+      <li>No tracking</li>
+    </ul>
+    <h3>6. Security</h3>
+    <p>All downloads use HTTPS encryption. Files auto-delete within 1 hour.</p>
+    <h3>7. Contact</h3>
+    <p>Questions? Email: privacy@masterbox.app</p>
+    """
+    return render_template_string(base_html(cfg, page_html("🔒 Privacy Policy", body)))
+
+@app.route("/disclaimer")
+def disclaimer():
+    cfg = load_cfg()
+    body = """
+    <h3>1. Copyright Notice</h3>
+    <p>Master Box does not host any videos or media. We only provide a tool to download publicly available content.</p>
+    <h3>2. User Responsibility</h3>
+    <ul>
+      <li>Download only content you have rights to</li>
+      <li>Do not redistribute copyrighted material</li>
+      <li>Respect content creators' rights</li>
+      <li>Follow local copyright laws</li>
+    </ul>
+    <h3>3. No Liability</h3>
+    <p>Master Box is not responsible for how users use downloaded content. Users are solely responsible for their actions.</p>
+    <h3>4. DMCA</h3>
+    <p>If you believe your content is being misused, contact: dmca@masterbox.app</p>
+    <h3>5. Legal Use Only</h3>
+    <p>This tool is for personal and legal use only. Downloading copyrighted content without permission is illegal.</p>
+    <h3>6. Age Restriction</h3>
+    <p>Users must be 13+ years old. Minors need parental consent.</p>
+    """
+    return render_template_string(base_html(cfg, page_html("⚠️ Disclaimer", body)))
+
+@app.route("/contact")
+def contact():
+    cfg = load_cfg()
+    body = """
+    <p>We'd love to hear from you! For any questions, feedback, or support:</p>
+    <h3>📧 Email</h3>
+    <p>support@masterbox.app</p>
+    <h3>🐛 Bug Reports</h3>
+    <p>bugs@masterbox.app</p>
+    <h3>💼 Business</h3>
+    <p>business@masterbox.app</p>
+    <h3>⏱️ Response Time</h3>
+    <p>We usually reply within 24-48 hours.</p>
+    """
+    return render_template_string(base_html(cfg, page_html("📧 Contact Us", body)))
+
+# ============ ADMIN ============
+ADMIN_LOGIN = """
+<div class="wrap" style="max-width:500px;margin:40px auto">
+  <div class="card">
+    <h2>🔐 Admin Login</h2>
+    <form method="POST">
+      <input type="password" name="password" placeholder="Enter admin password" required autofocus>
+      <button type="submit" class="btn">Login</button>
+      {ERR}
+    </form>
+  </div>
+</div>"""
+
+ADMIN_PANEL = """
+<div class="wrap" style="max-width:700px;margin:20px auto">
+  <div class="card">
+    <h2>⚙️ Admin Panel</h2>
+    <p style="font-size:13px;color:#6B7280;margin-bottom:16px">Edit your website content below. Changes appear instantly.</p>
+    <form method="POST" enctype="multipart/form-data" action="/admin/save">
+      <label style="font-size:13px;font-weight:700;color:#374151">Site Name</label>
+      <input type="text" name="site_name" value="{SITE_NAME}" required>
+      
+      <label style="font-size:13px;font-weight:700;color:#374151">Tagline</label>
+      <input type="text" name="tagline" value="{TAGLINE}">
+      
+      <label style="font-size:13px;font-weight:700;color:#374151">Logo (upload image)</label>
+      <input type="file" name="logo" accept="image/*">
+      {LOGO_PREVIEW}
+      
+      <label style="font-size:13px;font-weight:700;color:#374151">Home Title</label>
+      <input type="text" name="home_title" value="{HOME_TITLE}">
+      
+      <label style="font-size:13px;font-weight:700;color:#374151">Home Description</label>
+      <textarea name="home_text">{HOME_TEXT}</textarea>
+      
+      <label style="font-size:13px;font-weight:700;color:#374151">Footer Text</label>
+      <input type="text" name="footer_text" value="{FOOTER}">
+      
+      <button type="submit" class="btn">💾 Save Changes</button>
+    </form>
+    <div style="margin-top:12px;display:flex;gap:8px">
+      <a href="/" class="btn blue" style="text-decoration:none;text-align:center;flex:1">🏠 View Site</a>
+      <a href="/admin/logout" class="btn dark" style="text-decoration:none;text-align:center;flex:1">🚪 Logout</a>
+    </div>
+  </div>
+</div>"""
+
+@app.route("/admin", methods=["GET","POST"])
+def admin():
+    if session.get("admin"):
+        return redirect("/admin/panel")
+    err = ""
+    if request.method == "POST":
+        if request.form.get("password") == ADMIN_PASSWORD:
+            session["admin"] = True
+            return redirect("/admin/panel")
+        else:
+            err = '<div class="res err" style="display:block">❌ Wrong password</div>'
+    cfg = load_cfg()
+    return render_template_string(base_html(cfg, ADMIN_LOGIN.replace("{ERR}", err)))
+
+@app.route("/admin/panel")
+def admin_panel():
+    if not session.get("admin"):
+        return redirect("/admin")
+    cfg = load_cfg()
+    preview = ""
+    if cfg.get("logo_url"):
+        preview = f'<img src="{cfg["logo_url"]}" style="width:80px;height:80px;border-radius:12px;object-fit:cover;margin-bottom:12px;border:2px solid #FFD700">'
+    panel = (ADMIN_PANEL
+        .replace("{SITE_NAME}", cfg["site_name"])
+        .replace("{TAGLINE}", cfg["tagline"])
+        .replace("{LOGO_PREVIEW}", preview)
+        .replace("{HOME_TITLE}", cfg["home_title"])
+        .replace("{HOME_TEXT}", cfg["home_text"])
+        .replace("{FOOTER}", cfg["footer_text"]))
+    return render_template_string(base_html(cfg, panel))
+
+@app.route("/admin/save", methods=["POST"])
+def admin_save():
+    if not session.get("admin"):
+        return redirect("/admin")
+    cfg = load_cfg()
+    cfg["site_name"] = request.form.get("site_name", cfg["site_name"])
+    cfg["tagline"] = request.form.get("tagline", cfg["tagline"])
+    cfg["home_title"] = request.form.get("home_title", cfg["home_title"])
+    cfg["home_text"] = request.form.get("home_text", cfg["home_text"])
+    cfg["footer_text"] = request.form.get("footer_text", cfg["footer_text"])
+    
+    logo = request.files.get("logo")
+    if logo and logo.filename:
+        ext = os.path.splitext(logo.filename)[1].lower()
+        if ext in [".png",".jpg",".jpeg",".gif",".webp",".svg"]:
+            fname = "logo_" + str(uuid.uuid4())[:8] + ext
+            logo.save(os.path.join("static", fname))
+            cfg["logo_url"] = "/static/" + fname
+    
+    save_cfg(cfg)
+    return redirect("/admin/panel")
+
+@app.route("/admin/logout")
+def admin_logout():
+    session.pop("admin", None)
+    return redirect("/")
+
+@app.route("/static/<path:filename>")
+def static_files(filename):
+    return send_file(os.path.join("static", filename))
+
+# ============ API ============
+@app.route("/api/download", methods=["POST"])
+def api_dl():
+    url = request.args.get("url")
+    fmt = request.args.get("format", "video")
+    j = str(uuid.uuid4())[:8]
+    o = {'outtmpl': f'dl/{j}_%(title)s.%(ext)s', 'ffmpeg_location': FF, 'quiet': True}
+    if os.path.exists("cookies.txt"):
+        o['cookiefile'] = "cookies.txt"
+    if fmt == "mp3":
+        o['format'] = 'bestaudio/best'
+        o['postprocessors'] = [{'key':'FFmpegExtractAudio','preferredcodec':'mp3','preferredquality':'192'}]
+    else:
+        o['format'] = 'best[ext=mp4]/best'
+    try:
+        with yt_dlp.YoutubeDL(o) as y:
+            i = y.extract_info(url, download=True)
+            fn = y.prepare_filename(i)
+            if fmt == "mp3": fn = os.path.splitext(fn)[0] + ".mp3"
+            return {"ok": True, "title": i.get('title','video'), "filename": os.path.basename(fn)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+@app.route("/api/ringtone", methods=["POST"])
+def api_ring():
+    try:
+        f = request.files["file"]
+        start = float(request.form["start"])
+        end = float(request.form["end"])
+        j = str(uuid.uuid4())[:8]
+        inp = f"dl/{j}_in"
+        f.save(inp)
+        out = f"{j}_ring.m4r"
+        os.system(f'"{FF}" -y -i "{inp}" -ss {start} -t {end-start} -c copy "dl/{out}"')
+        return {"ok": True, "filename": out}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+@app.route("/api/file/<name>")
+def api_file(name):
+    return send_file(os.path.join("dl", name), as_attachment=True)
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
